@@ -554,26 +554,25 @@ namespace ImageBrowser
         public void NextImage()
         {
             if (CurrentFiles.Count == 0) return;
-            
             int index = CurrentFiles.IndexOf(SelectedFile);
-            
-            if (SlideSettings.IsRandom)
+
+            bool useRandom = IsSlideMode && SlideSettings.IsRandom;
+            if (useRandom)
             {
                 Random rnd = new Random();
                 index = rnd.Next(0, CurrentFiles.Count);
             }
             else
             {
-                if (index == -1) index = -1;
+                if (index < 0) index = -1;
                 index = index + 1;
-                
                 if (index >= CurrentFiles.Count)
                 {
-                    if (SlideSettings.IsLoop) index = 0;
-                    else { StopSlideShow(); return; }
+                    if (IsSlideMode && !SlideSettings.IsLoop) { StopSlideShow(); return; }
+                    index = 0;
                 }
             }
-            
+
             SelectedFile = CurrentFiles[index];
         }
 
@@ -581,9 +580,24 @@ namespace ImageBrowser
         {
             if (CurrentFiles.Count == 0) return;
             int index = CurrentFiles.IndexOf(SelectedFile);
-            if (index == -1) index = 1;
-            
-            index = (index - 1 + CurrentFiles.Count) % CurrentFiles.Count;
+
+            bool useRandom = IsSlideMode && SlideSettings.IsRandom;
+            if (useRandom)
+            {
+                Random rnd = new Random();
+                index = rnd.Next(0, CurrentFiles.Count);
+            }
+            else
+            {
+                if (index < 0) index = 0;
+                else index = index - 1;
+                if (index < 0)
+                {
+                    if (IsSlideMode && !SlideSettings.IsLoop) { StopSlideShow(); return; }
+                    index = CurrentFiles.Count - 1;
+                }
+            }
+
             SelectedFile = CurrentFiles[index];
         }
     }

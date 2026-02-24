@@ -19,8 +19,10 @@ namespace ImageBrowser
         
         private ListView _fileList;
         private ListBox _thumbList;
+        private TreeView _treeView;
         private ScrollViewer _viewScrollViewer;
         private Image _viewImage;
+        private bool _isCenteringThumb;
 
         public MainWindow()
         {
@@ -33,23 +35,44 @@ namespace ImageBrowser
                 string scrollStyle = @"
                     <Style TargetType='ScrollBar' xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
                         <Setter Property='Background' Value='Transparent'/>
+                        <Setter Property='Stylus.IsPressAndHoldEnabled' Value='false'/>
+                        <Setter Property='Stylus.IsFlicksEnabled' Value='false'/>
+                        <Setter Property='Foreground' Value='{DynamicResource Foreground}'/>
                         <Setter Property='Width' Value='10'/>
+                        <Setter Property='MinWidth' Value='10'/>
                         <Setter Property='Template'>
                             <Setter.Value>
                                 <ControlTemplate TargetType='ScrollBar'>
-                                    <Grid x:Name='GridRoot' Width='10' Background='Transparent'>
+                                    <Grid x:Name='Bg' SnapsToDevicePixels='true'>
                                         <Track x:Name='PART_Track' IsDirectionReversed='true'>
                                             <Track.Thumb>
                                                 <Thumb>
                                                     <Thumb.Template>
                                                         <ControlTemplate TargetType='Thumb'>
-                                                            <Border Background='#66888888' CornerRadius='4' Margin='2'/>
+                                                            <Border x:Name='ThumbBorder' Background='{TemplateBinding Foreground}' Opacity='0.3' CornerRadius='4' Margin='2'/>
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property='IsMouseOver' Value='true'>
+                                                                    <Setter TargetName='ThumbBorder' Property='Opacity' Value='0.6'/>
+                                                                </Trigger>
+                                                                <Trigger Property='IsDragging' Value='true'>
+                                                                    <Setter TargetName='ThumbBorder' Property='Opacity' Value='0.8'/>
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
                                                         </ControlTemplate>
                                                     </Thumb.Template>
                                                 </Thumb>
                                             </Track.Thumb>
                                         </Track>
                                     </Grid>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property='Orientation' Value='Horizontal'>
+                                            <Setter Property='Width' Value='Auto'/>
+                                            <Setter Property='MinWidth' Value='0'/>
+                                            <Setter Property='Height' Value='10'/>
+                                            <Setter Property='MinHeight' Value='10'/>
+                                            <Setter TargetName='PART_Track' Property='IsDirectionReversed' Value='False'/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
                                 </ControlTemplate>
                             </Setter.Value>
                         </Setter>
@@ -125,7 +148,11 @@ namespace ImageBrowser
             {
                 if (e.PropertyName == "SelectedFile")
                 {
-                    this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(AutoFitImage));
+                    this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(() => {
+                        AutoFitImage();
+                        BringTreeSelectionIntoView();
+                        if (_viewModel.IsViewMode || _viewModel.IsSlideMode) CenterThumbOnSelected();
+                    }));
                 }
                 else if (e.PropertyName == "IsFullScreen")
                 {
@@ -226,6 +253,67 @@ namespace ImageBrowser
                 if (child != null) break;
             }
             return child;
+        }
+
+        // Ensure the selected folder is visible in the TreeView
+        private void BringTreeSelectionIntoView()
+        {
+            if (_treeView == null) return;
+            // Find selected item
+            FileSystemItem target = FindSelectedItemInTree();
+            if (target == null) return;
+
+            // Ensure containers are generated by delaying to Loaded priority
+            this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
+            {
+                var tvi = FindTreeViewItem(_treeView, target);
+                if (tvi != null)
+                {
+                    tvi.BringIntoView();
+                }
+            }));
+        }
+
+        private FileSystemItem FindSelectedItemInTree()
+        {
+            foreach (var drive in _viewModel.Drives)
+            {
+                var found = FindSelectedRecursive(drive);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private FileSystemItem FindSelectedRecursive(FileSystemItem item)
+        {
+            if (item.IsSelected) return item;
+            foreach (var child in item.Children)
+            {
+                var found = FindSelectedRecursive(child);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private TreeViewItem FindTreeViewItem(ItemsControl container, object item)
+        {
+            if (container == null) return null;
+            var tvi = container.ItemContainerGenerator.ContainerFromItem(item) as TreeViewItem;
+            if (tvi != null) return tvi;
+
+            foreach (var subItem in container.Items)
+            {
+                var childContainer = container.ItemContainerGenerator.ContainerFromItem(subItem) as TreeViewItem;
+                if (childContainer != null)
+                {
+                    // Do NOT auto-expand here to avoid expanding entire tree.
+                    // Only search within already expanded containers.
+
+                    var result = FindTreeViewItem(childContainer, item);
+                    if (result != null) return result;
+                }
+            }
+            return null;
         }
 
         public static readonly DependencyProperty IsFullScreenProperty =
@@ -424,6 +512,9 @@ namespace ImageBrowser
             titleBar.Height = 40;
             titleBar.SetResourceReference(Grid.BackgroundProperty, "HeaderBackground");
             
+            this.WindowStyle = WindowStyle.None;
+            this.AllowsTransparency = true;
+            
             // Layout: [Icon+Title] [Spacer] [SkinSwitcher] [ModeButtons] [Sep] [Zoom] [Spacer] [WinBtns]
             // We use ColumnDefinitions for better control
             titleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); // 0: Icon+Title
@@ -431,6 +522,15 @@ namespace ImageBrowser
             titleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); // 2: Tools Center
             titleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // 3: Spacer
             titleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); // 4: Win Buttons
+
+            // Window Support (Drag and Maximize fix)
+            titleBar.MouseLeftButtonDown += (s, e) => {
+                if (e.ClickCount == 2) {
+                    this.WindowState = (this.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized);
+                } else {
+                    this.DragMove();
+                }
+            };
 
             // 0: App Icon and Title
             StackPanel titleInfo = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10,0,0,0) };
@@ -496,15 +596,17 @@ namespace ImageBrowser
                 if (this.WindowState == WindowState.Maximized)
                 {
                     // Exit Full Screen (Four inward corners)
-                    maxPath.Data = Geometry.Parse("M5,16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z");
-                    // 4K Border Fix
-                    rootGrid.Margin = new Thickness(8);
+                    maxPath.Data = Geometry.Parse("M5,16H8V19H10V14H5V16M8,8H5V10H10V5H8V8M14,19H16V16H19V14H14V19M16,8V5H14V10H19V8H16Z");
+                    this.BorderThickness = new Thickness(0);
+                    this.Padding = new Thickness(8); // Standard offset to prevent content bleeding in WindowStyle.None
+                    if (rootGrid.Margin.Left != 0) rootGrid.Margin = new Thickness(0);
                 }
                 else
                 {
                     // Maximize (Square)
                     maxPath.Data = Geometry.Parse("M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5A2,2 0 0,0 19,3M19,19H5V5H19V19Z");
-                    // Reset Margin
+                    this.BorderThickness = new Thickness(1);
+                    this.Padding = new Thickness(0);
                     rootGrid.Margin = new Thickness(0);
                 }
             };
@@ -512,8 +614,8 @@ namespace ImageBrowser
             // Initial State Check
             if (this.WindowState == WindowState.Maximized)
             {
-                 maxPath.Data = Geometry.Parse("M5,16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z");
-                 rootGrid.Margin = new Thickness(8);
+                 maxPath.Data = Geometry.Parse("M5,16H8V19H10V14H5V16M8,8H5V10H10V5H8V8M14,19H16V16H19V14H14V19M16,8V5H14V10H19V8H16Z");
+                 this.BorderThickness = new Thickness(0);
             }
 
             Button closeBtn = CreateSystemButton(CreateSystemPath("M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z"), () => this.Close(), true);
@@ -544,23 +646,24 @@ namespace ImageBrowser
             Border treeBorder = new Border { BorderThickness = new Thickness(0,0,1,0), Margin = new Thickness(0,0,0,0) };
             treeBorder.SetResourceReference(Border.BorderBrushProperty, "BorderBrush");
             
-            TreeView treeView = new TreeView();
-            treeView.SetResourceReference(TreeView.BackgroundProperty, "PanelBackground"); // Use PanelBackground for contrast
-            treeView.SetResourceReference(TreeView.ForegroundProperty, "Foreground");
-            treeView.BorderThickness = new Thickness(0);
-            treeView.Padding = new Thickness(5);
+            _treeView = new TreeView();
+            _treeView.SetResourceReference(TreeView.BackgroundProperty, "PanelBackground"); // Use PanelBackground for contrast
+            _treeView.SetResourceReference(TreeView.ForegroundProperty, "Foreground");
+            _treeView.BorderThickness = new Thickness(0);
+            _treeView.Padding = new Thickness(5);
             
             Style treeItemStyle = new Style(typeof(TreeViewItem));
             treeItemStyle.Setters.Add(new Setter(TreeViewItem.IsExpandedProperty, new Binding("IsExpanded") { Mode = BindingMode.TwoWay }));
+            treeItemStyle.Setters.Add(new Setter(TreeViewItem.IsSelectedProperty, new Binding("IsSelected") { Mode = BindingMode.TwoWay }));
             treeItemStyle.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("Foreground")));
-            treeView.ItemContainerStyle = treeItemStyle;
+            _treeView.ItemContainerStyle = treeItemStyle;
             
-            treeView.ItemsSource = _viewModel.Drives;
-            treeView.ItemTemplate = CreateTreeTemplate();
-            treeView.SelectedItemChanged += (s, e) => _viewModel.SelectedTreeItem = e.NewValue as FileSystemItem;
-            treeView.SetBinding(UIElement.VisibilityProperty, new Binding("IsSlideMode") { Converter = new BooleanToVisibilityConverter(true) });
+            _treeView.ItemsSource = _viewModel.Drives;
+            _treeView.ItemTemplate = CreateTreeTemplate();
+            _treeView.SelectedItemChanged += (s, e) => _viewModel.SelectedTreeItem = e.NewValue as FileSystemItem;
+            _treeView.SetBinding(UIElement.VisibilityProperty, new Binding("IsSlideMode") { Converter = new BooleanToVisibilityConverter(true) });
             
-            treeBorder.Child = treeView;
+            treeBorder.Child = _treeView;
             Grid.SetColumn(treeBorder, 0);
             mainContent.Children.Add(treeBorder);
 
@@ -578,11 +681,22 @@ namespace ImageBrowser
             _fileList.ItemsSource = _viewModel.CurrentFiles;
             _fileList.View = CreateGridView();
             _fileList.MouseDoubleClick += (s, e) => { 
-                if (_fileList.SelectedItem is FileSystemItem) 
+                // 防止在DoubleClick事件中直接切换ItemsSource引发重入卡顿，延迟到消息队列执行
+                var item = _fileList.SelectedItem as FileSystemItem;
+                if (item == null) return;
+                e.Handled = true;
+                this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(() =>
                 {
-                    _viewModel.SelectedFile = (FileSystemItem)_fileList.SelectedItem; 
-                    _viewModel.CurrentMode = DisplayMode.View;
-                }
+                    if (item.Type == ItemType.Folder)
+                    {
+                        _viewModel.OpenPath(item.FullPath); // 进入该文件夹（保持浏览模式）
+                    }
+                    else if (item.Type == ItemType.Image)
+                    {
+                        _viewModel.OpenPath(item.FullPath); // 进入查看模式并选中该图片
+                    }
+                    // 其他类型不响应
+                }));
             };
             _fileList.SetBinding(ListView.SelectedItemProperty, new Binding("SelectedFile"));
             _fileList.SetResourceReference(ListView.BackgroundProperty, "WindowBackground"); // Use WindowBackground
@@ -708,33 +822,44 @@ namespace ImageBrowser
             thumbStripGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             thumbStripGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             
-            thumbStripGrid.Children.Add(CreateGlassToolButton("M15.41,7.41L14,6L8,12L14,18L15.41,16.59L10.83,12L15.41,7.41Z", _viewModel.ScrollLeftCommand, "向左滚动"));
+            thumbStripGrid.Children.Add(CreateStripScrollButton("M15.41,7.41L14,6L8,12L14,18L15.41,16.59L10.83,12L15.41,7.41Z", _viewModel.PrevImageCommand, "上一张"));
             
             _thumbList = new ListBox();
             _thumbList.Height = 100;
             _thumbList.ItemsSource = _viewModel.CurrentFiles;
             _thumbList.ItemsPanel = CreateHorizontalPanelTemplate();
             _thumbList.ItemTemplate = CreateThumbnailTemplate();
+            _thumbList.SetValue(VirtualizingStackPanel.IsVirtualizingProperty, true);
+            _thumbList.SetValue(VirtualizingStackPanel.VirtualizationModeProperty, VirtualizationMode.Recycling);
+            _thumbList.SetValue(VirtualizingStackPanel.ScrollUnitProperty, ScrollUnit.Pixel);
+            // Selected item magnify effect
+            Style thumbItemStyle = new Style(typeof(ListBoxItem));
+            ScaleTransform st = new ScaleTransform(1.0, 1.0);
+            thumbItemStyle.Setters.Add(new Setter(ListBoxItem.LayoutTransformProperty, st));
+            Trigger selTrig = new Trigger { Property = ListBoxItem.IsSelectedProperty, Value = true };
+            selTrig.Setters.Add(new Setter(ListBoxItem.LayoutTransformProperty, new ScaleTransform(1.15, 1.15)));
+            thumbItemStyle.Triggers.Add(selTrig);
+            _thumbList.ItemContainerStyle = thumbItemStyle;
             _thumbList.SetBinding(ListBox.SelectedItemProperty, new Binding("SelectedFile"));
             _thumbList.SetResourceReference(ListBox.BackgroundProperty, "GlassBackground");
             ScrollViewer.SetVerticalScrollBarVisibility(_thumbList, ScrollBarVisibility.Disabled);
             ScrollViewer.SetHorizontalScrollBarVisibility(_thumbList, ScrollBarVisibility.Hidden);
             _thumbList.PreviewMouseWheel += (s, e) => {
-                 var scrollViewer = GetVisualChild<ScrollViewer>(_thumbList);
-                 if (scrollViewer != null) 
-                 {
-                     // Scroll one item at a time based on wheel direction
-                     int delta = e.Delta > 0 ? 1 : -1;
-                     // Wheel Up (Delta > 0) -> Scroll Left (Offset decreases)
-                     scrollViewer.ScrollToHorizontalOffset(scrollViewer.HorizontalOffset - delta);
-                 }
-                 e.Handled = true;
+                if (_viewModel.CurrentFiles == null || _viewModel.CurrentFiles.Count == 0) { e.Handled = true; return; }
+                int currentIndex = _viewModel.CurrentFiles.IndexOf(_viewModel.SelectedFile);
+                int step = e.Delta > 0 ? -1 : 1; // Up -> previous, Down -> next
+                int newIndex = currentIndex == -1 ? 0 : currentIndex + step;
+                if (newIndex < 0) newIndex = 0;
+                if (newIndex >= _viewModel.CurrentFiles.Count) newIndex = _viewModel.CurrentFiles.Count - 1;
+                if (newIndex != currentIndex) _viewModel.SelectedFile = _viewModel.CurrentFiles[newIndex];
+                CenterThumbOnSelected();
+                e.Handled = true;
             };
 
             Grid.SetColumn(_thumbList, 1);
             thumbStripGrid.Children.Add(_thumbList);
             
-            Button rightBtn = CreateGlassToolButton("M10,6L8.59,7.41L13.17,12L8.59,16.59L10,18L16,12L10,6Z", _viewModel.ScrollRightCommand, "向右滚动");
+            Button rightBtn = CreateStripScrollButton("M10,6L8.59,7.41L13.17,12L8.59,16.59L10,18L16,12L10,6Z", _viewModel.NextImageCommand, "下一张");
             Grid.SetColumn(rightBtn, 2);
             thumbStripGrid.Children.Add(rightBtn);
             
@@ -756,8 +881,6 @@ namespace ImageBrowser
             // --- Slide Overlay ---
             Grid slideOverlay = new Grid();
             slideOverlay.Background = Brushes.Black;
-            // Override Foreground to White for Slide Mode (since background is black)
-            slideOverlay.Resources["Foreground"] = Brushes.White;
             slideOverlay.SetBinding(UIElement.VisibilityProperty, new Binding("IsSlideMode") { Converter = new BooleanToVisibilityConverter() });
             Grid.SetRowSpan(slideOverlay, 2); 
             
@@ -768,21 +891,60 @@ namespace ImageBrowser
             
             // Slide Controls Layer
             Grid slideControls = new Grid();
-            // User feedback: "Cannot see buttons in full screen to exit". 
-            // So we do NOT hide controls in full screen, but maybe we should make them auto-hide or just always visible for now.
-            // Keeping them visible is safer to address the user's issue.
-            // slideControls.SetBinding(UIElement.VisibilityProperty, new Binding("IsFullScreen") { Source = _viewModel, Converter = new BooleanToVisibilityConverter(true) });
             
             // Settings Button (Top Left)
-            // Improved Gear Icon with Ring (Monochrome style)
-            Button settingsBtn = CreateGlassToolButton("M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,13L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.04 4.95,18.95L7.44,17.95C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.68 16.04,18.34 16.56,17.95L19.05,18.95C19.27,19.04 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z", _viewModel.ToggleSettingsCommand, "幻灯片设置");
+            Path settingsPath = CreateSystemPath("M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,13L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.04 4.95,18.95L7.44,17.95C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.68 16.04,18.34 16.56,17.95L19.05,18.95C19.27,19.04 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z");
+            settingsPath.Fill = Brushes.Gray;
+            Button settingsBtn = CreateGlassToolButton("", _viewModel.ToggleSettingsCommand, "幻灯片设置");
+            settingsBtn.Content = settingsPath;
             settingsBtn.HorizontalAlignment = HorizontalAlignment.Left;
             settingsBtn.VerticalAlignment = VerticalAlignment.Top;
             settingsBtn.Margin = new Thickness(10);
             slideControls.Children.Add(settingsBtn);
 
             // Full Screen Button (Top Right)
-            Button fullScreenBtn = CreateGlassToolButton("M5,5H10V7H7V10H5V5M14,5H19V10H17V7H14V5M17,14H19V19H14V17H17V14M10,17V19H5V14H7V17H10Z", _viewModel.ToggleFullScreenCommand, "全屏/退出全屏");
+            Path slideMaxPath = CreateSystemPath("M5,5H10V7H7V10H5V5M14,5H19V10H17V7H14V5M17,14H19V19H14V17H17V14M10,17V19H5V14H7V17H10Z");
+            slideMaxPath.Fill = Brushes.Gray;
+            Button fullScreenBtn = CreateGlassToolButton("", _viewModel.ToggleFullScreenCommand, "全屏/退出全屏");
+            fullScreenBtn.Content = slideMaxPath;
+            
+            // Re-template for slide buttons to have better visibility
+            ControlTemplate slideBtnTemplate = new ControlTemplate(typeof(Button));
+            FrameworkElementFactory slideBtnGrid = new FrameworkElementFactory(typeof(Grid));
+            slideBtnGrid.SetValue(Grid.BackgroundProperty, Brushes.Transparent); // Ensure hit test
+            
+            FrameworkElementFactory slideBtnBack = new FrameworkElementFactory(typeof(Border));
+            slideBtnBack.Name = "backBorder";
+            slideBtnBack.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
+            slideBtnBack.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(15, 128, 128, 128)));
+            
+            FrameworkElementFactory slideBtnCP = new FrameworkElementFactory(typeof(ContentPresenter));
+            slideBtnCP.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            slideBtnCP.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+            
+            slideBtnGrid.AppendChild(slideBtnBack);
+            slideBtnGrid.AppendChild(slideBtnCP);
+            slideBtnTemplate.VisualTree = slideBtnGrid;
+            
+            // Hover Trigger
+            Trigger slideHover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+            slideHover.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(60, 200, 200, 200)), "backBorder"));
+            slideHover.Setters.Add(new Setter(Border.BorderBrushProperty, new SolidColorBrush(Color.FromArgb(100, 255, 255, 255)), "backBorder"));
+            slideHover.Setters.Add(new Setter(Border.BorderThicknessProperty, new Thickness(1), "backBorder"));
+            slideBtnTemplate.Triggers.Add(slideHover);
+            
+            settingsBtn.Template = slideBtnTemplate;
+            fullScreenBtn.Template = slideBtnTemplate;
+
+            _viewModel.PropertyChanged += (s, e) => {
+                if (e.PropertyName == "IsFullScreen") {
+                    if (_viewModel.IsFullScreen)
+                        slideMaxPath.Data = Geometry.Parse("M5,16H8V19H10V14H5V16M8,8H5V10H10V5H8V8M14,19H16V16H19V14H14V19M16,8V5H14V10H19V8H16Z");
+                    else
+                        slideMaxPath.Data = Geometry.Parse("M5,5H10V7H7V10H5V5M14,5H19V10H17V7H14V5M17,14H19V19H14V17H17V14M10,17V19H5V14H7V17H10Z");
+                }
+            };
+
             fullScreenBtn.HorizontalAlignment = HorizontalAlignment.Right;
             fullScreenBtn.VerticalAlignment = VerticalAlignment.Top;
             fullScreenBtn.Margin = new Thickness(10);
@@ -853,7 +1015,7 @@ namespace ImageBrowser
             rootGrid.Children.Add(slideOverlay);
             
             // Initial Visuals
-            UpdateBackgroundVisuals(Theme.Mei);
+            UpdateBackgroundVisuals(_viewModel.Settings.CurrentTheme);
         }
 
         private Button CreateGlassToolButton(string pathData, ICommand command, string tooltip)
@@ -909,6 +1071,54 @@ namespace ImageBrowser
             // Darker Gray on Press
             pressed.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(60, 128, 128, 128)), "backBorder"));
             template.Triggers.Add(pressed);
+
+            btn.Template = template;
+            return btn;
+        }
+
+        private Button CreateStripScrollButton(string pathData, ICommand command, string tooltip)
+        {
+            Button btn = new Button
+            {
+                Command = command,
+                ToolTip = tooltip,
+                Width = 28,
+                VerticalAlignment = VerticalAlignment.Stretch,
+                Cursor = Cursors.Hand
+            };
+            btn.Background = Brushes.Transparent;
+            btn.BorderThickness = new Thickness(0);
+
+            ControlTemplate template = new ControlTemplate(typeof(Button));
+            FrameworkElementFactory grid = new FrameworkElementFactory(typeof(Grid));
+            grid.SetValue(Grid.BackgroundProperty, Brushes.Transparent);
+
+            FrameworkElementFactory glass = new FrameworkElementFactory(typeof(Border));
+            glass.Name = "glassBorder";
+            glass.SetValue(Border.OpacityProperty, 0.0);
+            glass.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(30, 80, 80, 80)));
+            glass.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)));
+            glass.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+            glass.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+            glass.SetValue(Border.MarginProperty, new Thickness(2));
+
+            FrameworkElementFactory path = new FrameworkElementFactory(typeof(Path));
+            path.SetValue(Path.DataProperty, Geometry.Parse(pathData));
+            path.SetValue(Path.FillProperty, Brushes.White);
+            path.SetValue(Path.StretchProperty, Stretch.Uniform);
+            path.SetValue(Path.WidthProperty, 18.0);
+            path.SetValue(Path.HeightProperty, 18.0);
+            path.SetValue(Path.VerticalAlignmentProperty, VerticalAlignment.Center);
+            path.SetValue(Path.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+
+            glass.AppendChild(path);
+            grid.AppendChild(glass);
+            template.VisualTree = grid;
+
+            Trigger mouseOver = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+            mouseOver.Setters.Add(new Setter(UIElement.OpacityProperty, 1.0, "glassBorder"));
+            mouseOver.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(60, 100, 100, 100)), "glassBorder"));
+            template.Triggers.Add(mouseOver);
 
             btn.Template = template;
             return btn;
@@ -1150,6 +1360,42 @@ namespace ImageBrowser
             image.SetValue(Image.MarginProperty, new Thickness(5));
             
             return new DataTemplate { VisualTree = image };
+        }
+
+        // Center the selected thumbnail in the thumbnail strip
+        private void CenterThumbOnSelected()
+        {
+            if (_thumbList == null || _thumbList.SelectedItem == null) return;
+            if (!_thumbList.IsVisible || _thumbList.ActualWidth <= 0) return;
+            if (_isCenteringThumb) return;
+            _isCenteringThumb = true;
+            var item = _thumbList.SelectedItem;
+            var container = _thumbList.ItemContainerGenerator.ContainerFromItem(item) as FrameworkElement;
+            if (container == null)
+            {
+                _thumbList.ScrollIntoView(item);
+                _isCenteringThumb = false;
+                _thumbList.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() => {
+                    if (_viewModel.IsViewMode || _viewModel.IsSlideMode) CenterThumbOnSelected();
+                }));
+                return;
+            }
+
+            var scrollViewer = GetVisualChild<ScrollViewer>(_thumbList);
+            if (scrollViewer == null) return;
+            var presenter = GetVisualChild<ScrollContentPresenter>(_thumbList);
+
+            Point itemPos = (presenter != null ? container.TransformToAncestor(presenter) : container.TransformToAncestor(scrollViewer)).Transform(new Point(0, 0));
+            double itemCenter = itemPos.X + container.ActualWidth / 2.0;
+            double viewportCenter = (presenter != null ? presenter.ActualWidth : scrollViewer.ViewportWidth) / 2.0;
+            double targetOffset = scrollViewer.HorizontalOffset + (itemCenter - viewportCenter);
+
+            if (targetOffset < 0) targetOffset = 0;
+            double maxOffset = scrollViewer.ExtentWidth - scrollViewer.ViewportWidth;
+            if (targetOffset > maxOffset) targetOffset = maxOffset;
+
+            scrollViewer.ScrollToHorizontalOffset(targetOffset);
+            _isCenteringThumb = false;
         }
     }
 }
