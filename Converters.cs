@@ -126,4 +126,33 @@ namespace ImageBrowser
             return 100.0;
         }
     }
+
+    public class SortArrowVisibilityConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            string currentSort = value as string;
+            string targetSort = parameter as string;
+            return (currentSort == targetSort) ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
+    public class SortArrowDirectionConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            bool isDescending = (bool)value;
+            return isDescending ? "▼" : "▲";
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            throw new NotImplementedException();
+        }
+    }
 }

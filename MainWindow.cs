@@ -23,6 +23,7 @@ namespace ImageBrowser
         private ScrollViewer _viewScrollViewer;
         private Image _viewImage;
         private bool _isCenteringThumb;
+        private bool _isAutoFitMode = true;
 
         public MainWindow()
         {
@@ -116,6 +117,9 @@ namespace ImageBrowser
                 }
             });
 
+            // Global Key Bindings
+            this.InputBindings.Add(new KeyBinding(_viewModel.DeleteCommand, Key.Delete, ModifierKeys.None));
+
             InitializeComponent();
             
             // Apply Settings
@@ -123,6 +127,13 @@ namespace ImageBrowser
             if (_viewModel.Settings.WindowHeight > 0) this.Height = _viewModel.Settings.WindowHeight;
             this.WindowState = _viewModel.Settings.WindowState;
             
+            this.SizeChanged += (s, e) => {
+                if (_viewModel.IsViewMode || _viewModel.IsSlideMode)
+                {
+                    AutoFitImage();
+                }
+            };
+
             this.Closing += (s, e) => {
                 if (this.WindowState == WindowState.Normal)
                 {
@@ -148,13 +159,26 @@ namespace ImageBrowser
             {
                 if (e.PropertyName == "SelectedFile")
                 {
+                    _viewModel.ImageRotation = 0; // Reset rotation on new image
+                    _isAutoFitMode = true; // Reset to auto-fit mode on new image
                     this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(() => {
                         AutoFitImage();
                         BringTreeSelectionIntoView();
                         if (_viewModel.IsViewMode || _viewModel.IsSlideMode) CenterThumbOnSelected();
                     }));
                 }
-                else if (e.PropertyName == "IsFullScreen")
+                else if (e.PropertyName == "IsViewMode" || e.PropertyName == "IsSlideMode" || e.PropertyName == "IsFullScreen" || e.PropertyName == "ImageRotation")
+                {
+                    if (_viewModel.IsViewMode || _viewModel.IsSlideMode)
+                    {
+                        if (e.PropertyName == "ImageRotation") _isAutoFitMode = true; // 旋转时也重置为自适应
+                        _isAutoFitMode = true; // 切换模式或全屏时，重置为自适应模式
+                        this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(() => {
+                            AutoFitImage();
+                        }));
+                    }
+                }
+                if (e.PropertyName == "IsFullScreen")
                 {
                     var winChrome = WindowChrome.GetWindowChrome(this);
                     var rootGrid = this.Content as Grid;
@@ -449,34 +473,64 @@ namespace ImageBrowser
 
         private void AutoFitImage()
         {
+            if (!_isAutoFitMode) return;
             if (_viewImage == null || _viewImage.Source == null || _viewScrollViewer == null) return;
             
-            // Only auto-fit if explicitly requested (ImageScale == 0) or if it's a fresh load
-            // The ViewModel sets ImageScale to 0.0 when a new image is selected
-            if (_viewModel.ImageScale > 0.1 && _viewModel.ImageScale != 100.0) return;
-
             var src = _viewImage.Source as BitmapSource;
             if (src == null) return;
 
-            double w = src.PixelWidth;
-            double h = src.PixelHeight;
+            // 1. 暂时设置图片不可见，以获取 ScrollViewer 纯净的可视区域 (Viewport)
+            _viewImage.Visibility = Visibility.Collapsed;
             
+            // 必须使用 Auto 或 Hidden，不能用 Disabled，否则无法获取 Viewport 尺寸
+            _viewScrollViewer.HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden;
+            _viewScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+            _viewScrollViewer.UpdateLayout();
+
+            // 2. 获取真实的物理可用尺寸
             double viewW = _viewScrollViewer.ActualWidth;
             double viewH = _viewScrollViewer.ActualHeight;
 
-            if (viewW <= 0 || viewH <= 0) return;
+            if (viewW <= 0 || viewH <= 0) 
+            {
+                _viewImage.Visibility = Visibility.Visible;
+                this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() => {
+                    AutoFitImage();
+                }));
+                return;
+            }
 
-            // Calculate scale to fit
-            double scaleX = viewW / w;
-            double scaleY = viewH / h;
-            
+            // 3. 引入 8 像素的安全留白（左右各 4，上下各 4）
+            viewW -= 8;
+            viewH -= 8;
+
+            // 获取图片原始尺寸
+            double w = src.PixelWidth;
+            double h = src.PixelHeight;
+
+            // 考虑旋转角度
+            double rotation = _viewModel.ImageRotation % 180;
+            bool isVertical = Math.Abs(rotation - 90) < 0.1;
+
+            double targetW = isVertical ? h : w;
+            double targetH = isVertical ? w : h;
+
+            // 4. 计算缩放比例 (使用向下取整，确保 100% 不触发滚动条)
+            double scaleX = viewW / targetW;
+            double scaleY = viewH / targetH;
             double scale = Math.Min(scaleX, scaleY);
             
-            // If image is smaller than view, default to 100% unless user wants stretch (but usually 1:1 is better for small images)
-            // However, "Adapt to window size" for large images means shrink.
-            if (scale > 1.0) scale = 1.0; 
+            _viewModel.ImageScale = Math.Floor(scale * 1000) / 10.0;
+
+            // 5. 关键：恢复图片显示，并根据当前模式决定滚动条状态
+            _viewImage.Visibility = Visibility.Visible;
             
-            _viewModel.ImageScale = scale * 100.0;
+            // 即使是自适应模式，也把滚动条设为 Auto，但因为比例已经缩小了，它们自然不会出现
+            // 这样就解决了“无法直接拖动”的问题，因为 ScrollViewer 现在是处于“可滚动”状态的
+            _viewScrollViewer.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
+            _viewScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            
+            _viewScrollViewer.UpdateLayout();
         }
 
         private Grid _backgroundGrid;
@@ -512,6 +566,11 @@ namespace ImageBrowser
             titleBar.Height = 40;
             titleBar.SetResourceReference(Grid.BackgroundProperty, "HeaderBackground");
             
+            // 为标题栏增加底部边界线
+            Border titleBottomBorder = new Border { BorderThickness = new Thickness(0, 0, 0, 1), VerticalAlignment = VerticalAlignment.Bottom };
+            titleBottomBorder.SetResourceReference(Border.BorderBrushProperty, "BorderBrush");
+            titleBar.Children.Add(titleBottomBorder);
+            
             this.WindowStyle = WindowStyle.None;
             this.AllowsTransparency = true;
             
@@ -535,7 +594,7 @@ namespace ImageBrowser
             // 0: App Icon and Title
             StackPanel titleInfo = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10,0,0,0) };
             Image iconImg = new Image { Source = this.Icon, Width = 20, Height = 20, Margin = new Thickness(0,0,10,0) };
-            TextBlock titleText = new TextBlock { Text = this.Title + " v1.0.9", VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeights.Bold };
+            TextBlock titleText = new TextBlock { Text = this.Title + " v1.2.2", VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeights.Bold };
             titleText.SetResourceReference(TextBlock.ForegroundProperty, "Foreground");
             titleInfo.Children.Add(iconImg);
             titleInfo.Children.Add(titleText);
@@ -644,7 +703,8 @@ namespace ImageBrowser
 
             // Sidebar
             Border treeBorder = new Border { BorderThickness = new Thickness(0,0,1,0), Margin = new Thickness(0,0,0,0) };
-            treeBorder.SetResourceReference(Border.BorderBrushProperty, "BorderBrush");
+            // 使用更明显的边框色
+            treeBorder.BorderBrush = new SolidColorBrush(Color.FromArgb(60, 128, 128, 128));
             
             _treeView = new TreeView();
             _treeView.SetResourceReference(TreeView.BackgroundProperty, "PanelBackground"); // Use PanelBackground for contrast
@@ -745,75 +805,130 @@ namespace ImageBrowser
             _viewScrollViewer = new ScrollViewer();
             _viewScrollViewer.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
             _viewScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            _viewScrollViewer.Padding = new Thickness(0);
+            _viewScrollViewer.BorderThickness = new Thickness(0);
             _viewScrollViewer.PanningMode = PanningMode.Both;
             _viewScrollViewer.PreviewMouseLeftButtonDown += OnViewScrollMouseDown;
             _viewScrollViewer.PreviewMouseMove += OnViewScrollMouseMove;
             _viewScrollViewer.PreviewMouseLeftButtonUp += OnViewScrollMouseUp;
             _viewScrollViewer.MouseDoubleClick += (s, e) => _viewModel.CurrentMode = DisplayMode.Browse;
+
+            // View Mode ToolBar (Top Floating inside imageArea)
+            StackPanel viewToolBar = new StackPanel { 
+                Orientation = Orientation.Horizontal, 
+                HorizontalAlignment = HorizontalAlignment.Center, 
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 20, 0, 0),
+                Background = Brushes.Transparent 
+            };
+            Panel.SetZIndex(viewToolBar, 100);
+            viewToolBar.Visibility = Visibility.Collapsed;
+
+            Button rotateCCWBtn = CreateRotationButton("M7.11,8.53L5.7,7.11C4.8,8.27 4.24,9.61 4.07,11H6.09C6.24,10.13 6.57,9.33 7.11,8.53M7.11,15.47C6.57,14.67 6.24,13.87 6.09,13H4.07C4.24,14.39 4.8,15.73 5.7,16.89L7.11,15.47M13,4.07V1L8.45,5.55L13,10.1V7.07C15.8,7.58 18,10.03 18,13C18,15.22 16.75,17.15 14.9,18.12L16.03,19.95C18.44,18.57 20,15.97 20,13C20,9.13 16.87,6 13,4.07Z", _viewModel.RotateCounterClockwiseCommand);
+            viewToolBar.Children.Add(rotateCCWBtn);
+
+            Button rotateCWBtn = CreateRotationButton("M16.89,15.47L18.31,16.89C19.2,15.73 19.76,14.39 19.93,13H17.91C17.76,13.87 17.43,14.67 16.89,15.47M16.89,8.53C17.43,9.33 17.76,10.13 17.91,11H19.93C19.76,9.61 19.2,8.27 18.31,7.11L16.89,8.53M11,4.07V1L15.55,5.55L11,10.1V7.07C8.2,7.58 6,10.03 6,13C6,15.22 7.25,17.15 9.1,18.12L7.97,19.95C5.56,18.57 4,15.97 4,13C4,9.13 7.13,6 11,4.07Z", _viewModel.RotateClockwiseCommand);
+            viewToolBar.Children.Add(rotateCWBtn);
+
+            // Floating Navigation Buttons
+            Button prevFloatBtn = CreateNavButton("M15.41,16.59L10.83,12L15.41,7.41L14,6L8,12L14,18L15.41,16.59Z", _viewModel.PrevImageCommand);
+            prevFloatBtn.HorizontalAlignment = HorizontalAlignment.Left;
+            prevFloatBtn.Margin = new Thickness(30, 0, 0, 0);
+            prevFloatBtn.Visibility = Visibility.Collapsed;
+
+            Button nextFloatBtn = CreateNavButton("M8.59,16.59L13.17,12L8.59,7.41L10,6L16,12L10,18L8.59,16.59Z", _viewModel.NextImageCommand);
+            nextFloatBtn.HorizontalAlignment = HorizontalAlignment.Right;
+            nextFloatBtn.Margin = new Thickness(0, 0, 30, 0);
+            nextFloatBtn.Visibility = Visibility.Collapsed;
+
+            imageArea.Children.Add(_viewScrollViewer);
+            imageArea.Children.Add(viewToolBar);
+            imageArea.Children.Add(prevFloatBtn);
+            imageArea.Children.Add(nextFloatBtn);
+
+            imageArea.MouseEnter += (s, e) => { 
+                if (_viewModel.IsViewMode) {
+                    viewToolBar.Visibility = Visibility.Visible;
+                    prevFloatBtn.Visibility = Visibility.Visible;
+                    nextFloatBtn.Visibility = Visibility.Visible;
+                }
+            };
+            imageArea.MouseLeave += (s, e) => {
+                viewToolBar.Visibility = Visibility.Collapsed;
+                prevFloatBtn.Visibility = Visibility.Collapsed;
+                nextFloatBtn.Visibility = Visibility.Collapsed;
+            };
+
+            viewModeGrid.Children.Add(imageArea);
             
             _viewImage = new Image();
             _viewImage.SetBinding(Image.SourceProperty, new Binding("SelectedFile.FullPath") { Converter = new ImagePathConverter() });
             _viewImage.Stretch = Stretch.None;
+            // 启用高质量缩放和像素对齐，确保图片边缘严丝合缝
+            RenderOptions.SetBitmapScalingMode(_viewImage, BitmapScalingMode.HighQuality);
+            _viewImage.SnapsToDevicePixels = true;
+            _viewImage.UseLayoutRounding = true;
             
-            // Image Zoom Transform (Use LayoutTransform for ScrollViewer compatibility)
+            // Image Zoom and Rotate Transform
             TransformGroup transformGroup = new TransformGroup();
+            
+            // Rotate
+            RotateTransform rotateTransform = new RotateTransform();
+            Binding rotateBinding = new Binding("ImageRotation") { Source = _viewModel };
+            BindingOperations.SetBinding(rotateTransform, RotateTransform.AngleProperty, rotateBinding);
+            transformGroup.Children.Add(rotateTransform);
+
+            // Scale
             ScaleTransform scaleTransform = new ScaleTransform();
-            // Bind ScaleX/Y to ImageScale
             Binding scaleBinding = new Binding("ImageScale") { Source = _viewModel, Converter = new ZoomConverter() };
             BindingOperations.SetBinding(scaleTransform, ScaleTransform.ScaleXProperty, scaleBinding);
             BindingOperations.SetBinding(scaleTransform, ScaleTransform.ScaleYProperty, scaleBinding);
             transformGroup.Children.Add(scaleTransform);
+
             _viewImage.LayoutTransform = transformGroup;
             
             _viewScrollViewer.Content = _viewImage;
             
             // Mouse Wheel Zoom
             _viewScrollViewer.PreviewMouseWheel += (s, e) => {
-                if (Keyboard.Modifiers == ModifierKeys.Control || true) 
+                // 移除 Ctrl 键限制，直接滚动滚轮即可缩放
+                double oldSize = _viewModel.ImageScale;
+                double delta = e.Delta > 0 ? 10 : -10;
+                double newSize = oldSize + delta;
+                if (newSize < 20) newSize = 20;
+                if (newSize > 400) newSize = 400;
+                
+                if (Math.Abs(newSize - oldSize) > 0.01)
                 {
-                    double oldSize = _viewModel.ImageScale;
-                    double delta = e.Delta > 0 ? 10 : -10;
-                    double newSize = oldSize + delta;
-                    if (newSize < 20) newSize = 20;
-                    if (newSize > 400) newSize = 400;
+                    _isAutoFitMode = false; // 进入手动缩放模式，停止自适应跟随窗口
                     
-                    if (Math.Abs(newSize - oldSize) > 0.01)
-                    {
-                        // Calculate Mouse Position Ratio
-                        Point mousePos = e.GetPosition(_viewScrollViewer);
-                        double ratio = newSize / oldSize;
-                        
-                        // Calculate Target Offset
-                        // NewOffset = (OldOffset + MousePos) * Ratio - MousePos
-                        double targetH = (_viewScrollViewer.HorizontalOffset + mousePos.X) * ratio - mousePos.X;
-                        double targetV = (_viewScrollViewer.VerticalOffset + mousePos.Y) * ratio - mousePos.Y;
-                        
-                        _viewModel.ImageScale = newSize;
-                        
-                        // Apply scroll after layout update
-                        _viewScrollViewer.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() => {
-                            _viewScrollViewer.ScrollToHorizontalOffset(targetH);
-                            _viewScrollViewer.ScrollToVerticalOffset(targetV);
-                        }));
-                    }
-                    e.Handled = true;
+                    // 手动缩放模式下开启滚动条
+                    _viewScrollViewer.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
+                    _viewScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+
+                    // Calculate Mouse Position Ratio
+                    Point mousePos = e.GetPosition(_viewScrollViewer);
+                    double ratio = newSize / oldSize;
+                    
+                    // Calculate Target Offset
+                    double targetH = (_viewScrollViewer.HorizontalOffset + mousePos.X) * ratio - mousePos.X;
+                    double targetV = (_viewScrollViewer.VerticalOffset + mousePos.Y) * ratio - mousePos.Y;
+                    
+                    _viewModel.ImageScale = newSize;
+                    
+                    // Apply scroll after layout update
+                    _viewScrollViewer.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() => {
+                        _viewScrollViewer.ScrollToHorizontalOffset(targetH);
+                        _viewScrollViewer.ScrollToVerticalOffset(targetV);
+                    }));
                 }
+                e.Handled = true;
             };
             
-            imageArea.Children.Add(_viewScrollViewer);
-
-            // Floating Navigation Buttons
-            Button prevFloatBtn = CreateNavButton("M15.41,16.59L10.83,12L15.41,7.41L14,6L8,12L14,18L15.41,16.59Z", _viewModel.PrevImageCommand);
-            prevFloatBtn.HorizontalAlignment = HorizontalAlignment.Left;
-            prevFloatBtn.Margin = new Thickness(30, 0, 0, 0); // Move inward by 30px
-            imageArea.Children.Add(prevFloatBtn);
-
-            Button nextFloatBtn = CreateNavButton("M8.59,16.59L13.17,12L8.59,7.41L10,6L16,12L10,18L8.59,16.59Z", _viewModel.NextImageCommand);
-            nextFloatBtn.HorizontalAlignment = HorizontalAlignment.Right;
-            nextFloatBtn.Margin = new Thickness(0, 0, 30, 0); // Move inward by 30px
-            imageArea.Children.Add(nextFloatBtn);
-
-            viewModeGrid.Children.Add(imageArea);
+            // viewModeGrid.Children.Add(imageArea); // 移除这行重复添加
+            
+            // --- 彻底清理冗余的导航按钮添加逻辑 ---
+            // 上面已经把它们移入 imageArea 的初始化块中了
             
             // Thumbnail Strip with Scroll Buttons
             Grid thumbStripGrid = new Grid();
@@ -1018,6 +1133,56 @@ namespace ImageBrowser
             UpdateBackgroundVisuals(_viewModel.Settings.CurrentTheme);
         }
 
+        private Button CreateRotationButton(string pathData, ICommand command)
+        {
+            Button btn = new Button 
+            { 
+                Command = command, 
+                Width = 36,  // 进一步调小
+                Height = 36,
+                Margin = new Thickness(6, 0, 6, 0),
+                Cursor = Cursors.Hand,
+                Focusable = false
+            };
+            
+            btn.Background = Brushes.Transparent;
+            btn.BorderThickness = new Thickness(0);
+            
+            ControlTemplate template = new ControlTemplate(typeof(Button));
+            FrameworkElementFactory grid = new FrameworkElementFactory(typeof(Grid));
+            grid.SetValue(Grid.BackgroundProperty, Brushes.Transparent);
+            
+            // Background Border (Extremely Light Frosted Gray)
+            FrameworkElementFactory back = new FrameworkElementFactory(typeof(Border));
+            back.Name = "backBorder";
+            back.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(10, 150, 150, 150))); // 更浅更透明
+            back.SetValue(Border.CornerRadiusProperty, new CornerRadius(18));
+            
+            // Icon
+            FrameworkElementFactory viewbox = new FrameworkElementFactory(typeof(Viewbox));
+            viewbox.SetValue(Viewbox.WidthProperty, 20.0); // 图标也变小
+            viewbox.SetValue(Viewbox.HeightProperty, 20.0);
+            
+            FrameworkElementFactory path = new FrameworkElementFactory(typeof(Path));
+            path.SetValue(Path.DataProperty, Geometry.Parse(pathData));
+            path.SetValue(Path.FillProperty, new SolidColorBrush(Color.FromRgb(180, 180, 180))); // 极浅灰色图标
+            path.SetValue(Path.StretchProperty, Stretch.Uniform);
+            
+            viewbox.AppendChild(path);
+            grid.AppendChild(back);
+            grid.AppendChild(viewbox);
+            
+            template.VisualTree = grid;
+            
+            // Triggers
+            Trigger mouseOver = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+            mouseOver.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(30, 150, 150, 150)), "backBorder"));
+            template.Triggers.Add(mouseOver);
+            
+            btn.Template = template;
+            return btn;
+        }
+
         private Button CreateGlassToolButton(string pathData, ICommand command, string tooltip)
         {
             Button btn = new Button 
@@ -1081,7 +1246,7 @@ namespace ImageBrowser
             Button btn = new Button
             {
                 Command = command,
-                ToolTip = tooltip,
+                // ToolTip = tooltip, // 移除 ToolTip
                 Width = 28,
                 VerticalAlignment = VerticalAlignment.Stretch,
                 Cursor = Cursors.Hand
@@ -1095,7 +1260,7 @@ namespace ImageBrowser
 
             FrameworkElementFactory glass = new FrameworkElementFactory(typeof(Border));
             glass.Name = "glassBorder";
-            glass.SetValue(Border.OpacityProperty, 0.0);
+            glass.SetValue(Border.OpacityProperty, 1.0); // 改为常驻显示（从 0.0 改为 1.0）
             glass.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(30, 80, 80, 80)));
             glass.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)));
             glass.SetValue(Border.BorderThicknessProperty, new Thickness(1));
@@ -1137,68 +1302,56 @@ namespace ImageBrowser
             Button btn = new Button 
             { 
                 Command = command, 
-                Width = 28,
-                Height = 168,
+                Width = 36, // 稍微加宽
+                Height = 180,
                 VerticalAlignment = VerticalAlignment.Center,
                 Cursor = Cursors.Hand
             };
-            Panel.SetZIndex(btn, 100); // Ensure on top of image
+            Panel.SetZIndex(btn, 100); 
             
-            // Invisible background for hit testing
             btn.Background = Brushes.Transparent; 
             btn.BorderThickness = new Thickness(0);
             
             ControlTemplate template = new ControlTemplate(typeof(Button));
             FrameworkElementFactory grid = new FrameworkElementFactory(typeof(Grid));
-            // Crucial: Grid must be transparent to receive mouse events when visuals are hidden
             grid.SetValue(Grid.BackgroundProperty, Brushes.Transparent);
             
             // Glass Pane Border
             FrameworkElementFactory glass = new FrameworkElementFactory(typeof(Border));
             glass.Name = "glassBorder";
-            glass.SetValue(Border.OpacityProperty, 0.0); // Start Invisible
+            glass.SetValue(Border.OpacityProperty, 0.0); // 默认隐藏
             
-            // Even Lighter & More Transparent (User request: Width -40% again, Color weaken 40%)
-            // Alpha 30 (was 50), Color same Gray (80,80,80)
-            glass.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(30, 80, 80, 80)));
-            glass.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)));
+            // Alpha 15 (Very light), Gray Color (120,120,120)
+            glass.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(15, 120, 120, 120)));
+            glass.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromArgb(30, 255, 255, 255)));
             glass.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-            glass.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
-            glass.SetValue(Border.MarginProperty, new Thickness(2)); // Minimal margin for very narrow button
-            
-            // Drop Shadow for depth (Weaker shadow too)
-            var shadow = new DropShadowEffect { Color = Colors.Black, BlurRadius = 8, ShadowDepth = 1, Opacity = 0.3 };
-            glass.SetValue(Border.EffectProperty, shadow);
+            glass.SetValue(Border.CornerRadiusProperty, new CornerRadius(10));
+            glass.SetValue(Border.MarginProperty, new Thickness(2));
             
             // Icon
+            FrameworkElementFactory viewbox = new FrameworkElementFactory(typeof(Viewbox));
+            viewbox.SetValue(Viewbox.WidthProperty, 24.0);
+            viewbox.SetValue(Viewbox.HeightProperty, 24.0);
+            viewbox.SetValue(Viewbox.VerticalAlignmentProperty, VerticalAlignment.Center);
+            
             FrameworkElementFactory path = new FrameworkElementFactory(typeof(Path));
             path.SetValue(Path.DataProperty, Geometry.Parse(pathData));
-            path.SetValue(Path.FillProperty, Brushes.White);
+            path.SetValue(Path.FillProperty, new SolidColorBrush(Color.FromRgb(180, 180, 180))); // 浅灰色图标
             path.SetValue(Path.StretchProperty, Stretch.Uniform);
-            path.SetValue(Path.WidthProperty, 20.0);
-            path.SetValue(Path.HeightProperty, 20.0);
-            path.SetValue(Path.VerticalAlignmentProperty, VerticalAlignment.Center);
-            path.SetValue(Path.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            // Add shadow to icon too
-            path.SetValue(Path.EffectProperty, new DropShadowEffect { Color = Colors.Black, BlurRadius = 2, ShadowDepth = 1, Opacity = 0.5 });
             
-            glass.AppendChild(path);
+            viewbox.AppendChild(path);
+            glass.AppendChild(viewbox);
             grid.AppendChild(glass);
             
             template.VisualTree = grid;
             
-            // Triggers for Hover
+            // Triggers
             Trigger mouseOver = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
-            // Show Glass Border
             mouseOver.Setters.Add(new Setter(UIElement.OpacityProperty, 1.0, "glassBorder"));
-            // Light up the glass on hover (Weaker than before: Alpha 60)
-            mouseOver.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(60, 100, 100, 100)), "glassBorder"));
-            
+            mouseOver.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(40, 120, 120, 120)), "glassBorder"));
             template.Triggers.Add(mouseOver);
             
             btn.Template = template;
-            // Do NOT set btn.Opacity = 0 locally, or it overrides the trigger!
-            
             return btn;
         }
 
@@ -1314,35 +1467,105 @@ namespace ImageBrowser
         private ViewBase CreateGridView()
         {
             GridView grid = new GridView();
-            GridViewColumn colName = new GridViewColumn { Header = "名称", Width = 250 };
+            
+            // Name Column
+            GridViewColumn colName = new GridViewColumn { Header = CreateSortHeader("名称", "Name"), Width = 250 };
             FrameworkElementFactory textName = new FrameworkElementFactory(typeof(TextBlock));
             textName.SetBinding(TextBlock.TextProperty, new Binding("Name"));
             textName.SetValue(TextBlock.ForegroundProperty, new DynamicResourceExtension("Foreground"));
             colName.CellTemplate = new DataTemplate { VisualTree = textName };
+
+            // Resolution Column (New)
+            GridViewColumn colRes = new GridViewColumn { Header = CreateSortHeader("分辨率", "Resolution"), Width = 120 };
+            FrameworkElementFactory textRes = new FrameworkElementFactory(typeof(TextBlock));
+            textRes.SetBinding(TextBlock.TextProperty, new Binding("Resolution"));
+            textRes.SetValue(TextBlock.ForegroundProperty, new DynamicResourceExtension("Foreground"));
+            colRes.CellTemplate = new DataTemplate { VisualTree = textRes };
             
-            GridViewColumn colSize = new GridViewColumn { Header = "大小", Width = 100 };
+            // Size Column
+            GridViewColumn colSize = new GridViewColumn { Header = CreateSortHeader("大小", "Size"), Width = 100 };
             FrameworkElementFactory textSize = new FrameworkElementFactory(typeof(TextBlock));
             textSize.SetBinding(TextBlock.TextProperty, new Binding("Size") { Converter = new FileSizeConverter() });
             textSize.SetValue(TextBlock.ForegroundProperty, new DynamicResourceExtension("Foreground"));
             colSize.CellTemplate = new DataTemplate { VisualTree = textSize };
             
-            GridViewColumn colType = new GridViewColumn { Header = "类型", Width = 80 };
+            // Type Column
+            GridViewColumn colType = new GridViewColumn { Header = CreateSortHeader("类型", "Type"), Width = 80 };
             FrameworkElementFactory textType = new FrameworkElementFactory(typeof(TextBlock));
             textType.SetBinding(TextBlock.TextProperty, new Binding("Type") { Converter = new ItemTypeConverter() });
             textType.SetValue(TextBlock.ForegroundProperty, new DynamicResourceExtension("Foreground"));
             colType.CellTemplate = new DataTemplate { VisualTree = textType };
 
-            GridViewColumn colDate = new GridViewColumn { Header = "修改日期", Width = 150 };
+            // Date Column
+            GridViewColumn colDate = new GridViewColumn { Header = CreateSortHeader("修改日期", "Date"), Width = 150 };
             FrameworkElementFactory textDate = new FrameworkElementFactory(typeof(TextBlock));
             textDate.SetBinding(TextBlock.TextProperty, new Binding("CreationTime") { StringFormat = "yyyy-MM-dd HH:mm" });
             textDate.SetValue(TextBlock.ForegroundProperty, new DynamicResourceExtension("Foreground"));
             colDate.CellTemplate = new DataTemplate { VisualTree = textDate };
 
             grid.Columns.Add(colName);
+            grid.Columns.Add(colRes);
             grid.Columns.Add(colSize);
             grid.Columns.Add(colType);
             grid.Columns.Add(colDate);
             return grid;
+        }
+
+        private object CreateSortHeader(string text, string commandParam)
+        {
+            Button btn = new Button
+            {
+                Command = _viewModel.SortCommand,
+                CommandParameter = commandParam,
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Padding = new Thickness(5, 0, 5, 0),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                VerticalContentAlignment = VerticalAlignment.Stretch,
+                Focusable = false
+            };
+            
+            ControlTemplate template = new ControlTemplate(typeof(Button));
+            FrameworkElementFactory grid = new FrameworkElementFactory(typeof(Grid));
+            grid.SetValue(Grid.BackgroundProperty, Brushes.Transparent); // 整个 Grid 可点击
+            
+            FrameworkElementFactory sp = new FrameworkElementFactory(typeof(StackPanel));
+            sp.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
+            sp.SetValue(StackPanel.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+            sp.SetValue(StackPanel.VerticalAlignmentProperty, VerticalAlignment.Center);
+            
+            FrameworkElementFactory tb = new FrameworkElementFactory(typeof(TextBlock));
+            tb.SetValue(TextBlock.TextProperty, text);
+            tb.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+            sp.AppendChild(tb);
+            
+            FrameworkElementFactory arrow = new FrameworkElementFactory(typeof(TextBlock));
+            arrow.SetValue(TextBlock.MarginProperty, new Thickness(5, 0, 0, 0));
+            arrow.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+            arrow.SetValue(TextBlock.FontSizeProperty, 10.0);
+            
+            // Binding for Arrow Visibility and Direction
+            Binding visibilityBinding = new Binding("SortColumn") { 
+                Source = _viewModel, 
+                Converter = new SortArrowVisibilityConverter(), 
+                ConverterParameter = commandParam 
+            };
+            arrow.SetBinding(UIElement.VisibilityProperty, visibilityBinding);
+            
+            Binding textBinding = new Binding("IsSortDescending") { 
+                Source = _viewModel, 
+                Converter = new SortArrowDirectionConverter() 
+            };
+            arrow.SetBinding(TextBlock.TextProperty, textBinding);
+            
+            sp.AppendChild(arrow);
+            grid.AppendChild(sp);
+            template.VisualTree = grid;
+            btn.Template = template;
+            
+            return btn;
         }
 
         private ItemsPanelTemplate CreateHorizontalPanelTemplate()

@@ -33,7 +33,14 @@ namespace ImageBrowser
             SlideInterval = 3;
             SlideIsRandom = false;
             SlideIsLoop = true;
+
+            SortColumn = "Name";
+            IsSortDescending = false;
         }
+
+        // Sorting Persistence
+        public string SortColumn { get; set; }
+        public bool IsSortDescending { get; set; }
     }
 
     public enum DisplayMode { Browse, View, Slide }
@@ -57,6 +64,34 @@ namespace ImageBrowser
                 }
             }
         }
+
+        private string _sortColumn = "Name";
+        public string SortColumn
+        {
+            get { return _sortColumn; }
+            set 
+            { 
+                _sortColumn = value; 
+                OnPropertyChanged("SortColumn"); 
+                SortFiles(); 
+                if (Settings != null) { Settings.SortColumn = value; SaveSettings(); }
+            }
+        }
+
+        private bool _isSortDescending = false;
+        public bool IsSortDescending
+        {
+            get { return _isSortDescending; }
+            set 
+            { 
+                _isSortDescending = value; 
+                OnPropertyChanged("IsSortDescending"); 
+                SortFiles(); 
+                if (Settings != null) { Settings.IsSortDescending = value; SaveSettings(); }
+            }
+        }
+
+        public RelayCommand SortCommand { get; set; }
         
         public bool IsBrowseMode { get { return CurrentMode == DisplayMode.Browse; } }
         public bool IsViewMode { get { return CurrentMode == DisplayMode.View; } }
@@ -208,6 +243,16 @@ namespace ImageBrowser
             }
         }
 
+        private double _imageRotation = 0.0;
+        public double ImageRotation
+        {
+            get { return _imageRotation; }
+            set { _imageRotation = value; OnPropertyChanged("ImageRotation"); }
+        }
+
+        public RelayCommand RotateClockwiseCommand { get; set; }
+        public RelayCommand RotateCounterClockwiseCommand { get; set; }
+
         public double CurrentZoom
         {
             get 
@@ -230,6 +275,7 @@ namespace ImageBrowser
         public RelayCommand ScrollRightCommand { get; set; }
         public RelayCommand NextImageCommand { get; set; }
         public RelayCommand PrevImageCommand { get; set; }
+        public RelayCommand DeleteCommand { get; set; }
 
         private string _settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ImageBrowser", "settings.xml");
         public AppSettings Settings { get; set; }
@@ -251,12 +297,25 @@ namespace ImageBrowser
             ToggleFullScreenCommand = new RelayCommand(o => IsFullScreen = !IsFullScreen);
             NextImageCommand = new RelayCommand(o => NextImage());
             PrevImageCommand = new RelayCommand(o => PrevImage());
+            DeleteCommand = new RelayCommand(o => DeleteSelectedFile());
+            RotateClockwiseCommand = new RelayCommand(o => ImageRotation = (ImageRotation + 90) % 360);
+            RotateCounterClockwiseCommand = new RelayCommand(o => ImageRotation = (ImageRotation - 90 + 360) % 360);
+            SortCommand = new RelayCommand(o => 
+            {
+                string col = o as string;
+                if (col == SortColumn) IsSortDescending = !IsSortDescending;
+                else SortColumn = col;
+            });
             
             _slideTimer = new DispatcherTimer();
             
             // Load Settings
             LoadSettings();
             
+            // Apply sorting from persistence
+            _sortColumn = Settings.SortColumn;
+            _isSortDescending = Settings.IsSortDescending;
+
             // Apply Slide Settings from Persistence
             SlideSettings.IntervalSeconds = Settings.SlideInterval;
             SlideSettings.IsRandom = Settings.SlideIsRandom;
@@ -408,14 +467,28 @@ namespace ImageBrowser
                     string ext = file.Extension.ToLower();
                     if (ext == ".jpg" || ext == ".png" || ext == ".bmp" || ext == ".jpeg")
                     {
-                        images.Add(new FileSystemItem(true)
+                        var item = new FileSystemItem(true)
                         {
                             Name = file.Name,
                             FullPath = file.FullName,
                             Type = ItemType.Image,
                             Size = file.Length,
                             CreationTime = file.CreationTime
+                        };
+                        
+                        // 异步加载分辨率
+                        System.Threading.Tasks.Task.Factory.StartNew(() => {
+                            try {
+                                using (var img = System.Drawing.Image.FromFile(item.FullPath)) {
+                                    item.TotalPixels = (long)img.Width * img.Height;
+                                    item.Resolution = string.Format("{0} × {1}", img.Width, img.Height);
+                                }
+                            } catch {
+                                item.Resolution = "未知";
+                            }
                         });
+
+                        images.Add(item);
                     }
                     else
                     {
@@ -434,7 +507,9 @@ namespace ImageBrowser
                 // If NO images, show folders and other files
                 if (images.Count > 0)
                 {
+                    // For images, we just use the list. Sorting will be applied by SortFiles
                     foreach (var img in images) CurrentFiles.Add(img);
+                    SortFiles();
                 }
                 else
                 {
@@ -454,9 +529,57 @@ namespace ImageBrowser
                     }
                     // Add other files
                     foreach (var file in others) CurrentFiles.Add(file);
+                    SortFiles(); // Sort folders and others too
                 }
             }
             catch { }
+        }
+
+        private void SortFiles()
+        {
+            if (CurrentFiles == null || CurrentFiles.Count <= 1) return;
+
+            // Remember selection
+            var selected = SelectedFile;
+
+            // Separately handle Folders (keep them at top if mixed, or just sort everything)
+            // Usually in browse mode, folders are at top.
+            var folders = CurrentFiles.Where(f => f.Type == ItemType.Folder).ToList();
+            var files = CurrentFiles.Where(f => f.Type != ItemType.Folder).ToList();
+
+            Func<FileSystemItem, object> keySelector = f => 
+            {
+                switch (SortColumn)
+                {
+                    case "Size": return f.Size;
+                    case "Date": return f.CreationTime;
+                    case "Type": return f.Type;
+                    case "Resolution": return f.TotalPixels;
+                    default: return f.Name;
+                }
+            };
+
+            if (IsSortDescending)
+            {
+                folders = folders.OrderByDescending(keySelector).ThenByDescending(f => f.Name).ToList();
+                files = files.OrderByDescending(keySelector).ThenByDescending(f => f.Name).ToList();
+            }
+            else
+            {
+                folders = folders.OrderBy(keySelector).ThenBy(f => f.Name).ToList();
+                files = files.OrderBy(keySelector).ThenBy(f => f.Name).ToList();
+            }
+
+            // Re-populate
+            CurrentFiles.Clear();
+            foreach (var f in folders) CurrentFiles.Add(f);
+            foreach (var f in files) CurrentFiles.Add(f);
+
+            // Restore selection without triggering side effects if possible
+            if (selected != null)
+            {
+                SelectedFile = CurrentFiles.FirstOrDefault(f => f.FullPath == selected.FullPath);
+            }
         }
 
         public void OpenPath(string path)
@@ -599,6 +722,56 @@ namespace ImageBrowser
             }
 
             SelectedFile = CurrentFiles[index];
+        }
+
+        private void DeleteSelectedFile()
+        {
+            if (SelectedFile == null) return;
+
+            var item = SelectedFile;
+            string msg = string.Format("确定要永久删除此{0}吗？\n\n{1}", 
+                item.Type == ItemType.Folder ? "文件夹" : "图片", item.Name);
+            
+            if (MessageBox.Show(msg, "确认删除", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
+            {
+                try
+                {
+                    // 彻底删除
+                    if (item.Type == ItemType.Folder)
+                    {
+                        Directory.Delete(item.FullPath, true);
+                    }
+                    else
+                    {
+                        File.Delete(item.FullPath);
+                    }
+
+                    // 从列表中移除
+                    int index = CurrentFiles.IndexOf(item);
+                    CurrentFiles.Remove(item);
+
+                    // 自动选择下一个
+                    if (CurrentFiles.Count > 0)
+                    {
+                        if (index >= CurrentFiles.Count) index = CurrentFiles.Count - 1;
+                        SelectedFile = CurrentFiles[index];
+                    }
+                    else
+                    {
+                        SelectedFile = null;
+                        // 如果在查看模式或幻灯片模式且没图片了，返回浏览模式
+                        if (IsViewMode || IsSlideMode)
+                        {
+                            CurrentMode = DisplayMode.Browse;
+                            StopSlideShow();
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("删除失败: " + ex.Message, "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
         }
     }
 }

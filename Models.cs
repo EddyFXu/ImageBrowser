@@ -14,6 +14,16 @@ namespace ImageBrowser
         public long Size { get; set; }
         public DateTime CreationTime { get; set; }
         public ImageSource Icon { get; set; }
+        
+        private string _resolution;
+        public string Resolution
+        {
+            get { return _resolution; }
+            set { _resolution = value; OnPropertyChanged("Resolution"); }
+        }
+
+        // For sorting: pixels count (Width * Height)
+        public long TotalPixels { get; set; }
 
         private bool _isExpanded;
         public bool IsExpanded 
