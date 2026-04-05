@@ -13,19 +13,15 @@ namespace ImageBrowser
             {
                 App app = new App();
                 if (app.Resources == null) app.Resources = new ResourceDictionary();
-                
-                MainWindow win = new MainWindow();
-                
-                // Handle command line args
+
+                string initialPath = null;
                 if (args != null && args.Length > 0)
                 {
                     string path = args[0];
-                    if (File.Exists(path))
-                    {
-                        win.OpenInitialImage(path);
-                    }
+                    if (!string.IsNullOrEmpty(path) && File.Exists(path)) initialPath = path;
                 }
-                
+
+                MainWindow win = new MainWindow(initialPath);
                 win.Show();
                 app.Run();
             }

@@ -16,6 +16,7 @@ namespace ImageBrowser
     public class MainWindow : Window
     {
         private MainViewModel _viewModel;
+        private readonly string _startupPath;
         
         private ListView _fileList;
         private ListBox _thumbList;
@@ -25,8 +26,9 @@ namespace ImageBrowser
         private bool _isCenteringThumb;
         private bool _isAutoFitMode = true;
 
-        public MainWindow()
+        public MainWindow(string startupPath = null)
         {
+            _startupPath = startupPath;
             _viewModel = new MainViewModel();
             this.DataContext = _viewModel;
             
@@ -126,6 +128,19 @@ namespace ImageBrowser
             if (_viewModel.Settings.WindowWidth > 0) this.Width = _viewModel.Settings.WindowWidth;
             if (_viewModel.Settings.WindowHeight > 0) this.Height = _viewModel.Settings.WindowHeight;
             this.WindowState = _viewModel.Settings.WindowState;
+
+            this.Loaded += (s, e) =>
+            {
+                string path = _startupPath;
+                if (string.IsNullOrEmpty(path)) path = _viewModel.StartupPath;
+                if (!string.IsNullOrEmpty(path))
+                {
+                    this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(() =>
+                    {
+                        _viewModel.OpenPath(path);
+                    }));
+                }
+            };
             
             this.SizeChanged += (s, e) => {
                 if (_viewModel.IsViewMode || _viewModel.IsSlideMode)
@@ -258,8 +273,10 @@ namespace ImageBrowser
         {
             if (_viewModel != null)
             {
-                _viewModel.OpenPath(path);
-                this.WindowState = WindowState.Normal;
+                this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(() =>
+                {
+                    _viewModel.OpenPath(path);
+                }));
                 this.Activate();
             }
         }
@@ -366,7 +383,7 @@ namespace ImageBrowser
                 stack.SetValue(StackPanel.MarginProperty, new Thickness(5));
                 
                 FrameworkElementFactory img = new FrameworkElementFactory(typeof(Image));
-                img.SetBinding(Image.SourceProperty, new Binding("FullPath") { Converter = new ImagePathConverter() });
+                img.SetBinding(Image.SourceProperty, new Binding("FullPath") { Converter = new ImagePathConverter(), ConverterParameter = 256 });
                 img.SetValue(Image.HeightProperty, new Binding("ThumbnailSize") { Source = _viewModel });
                 img.SetValue(Image.StretchProperty, Stretch.Uniform);
                 
@@ -1578,7 +1595,7 @@ namespace ImageBrowser
         private DataTemplate CreateThumbnailTemplate()
         {
             FrameworkElementFactory image = new FrameworkElementFactory(typeof(Image));
-            image.SetBinding(Image.SourceProperty, new Binding("FullPath") { Converter = new ImagePathConverter() });
+            image.SetBinding(Image.SourceProperty, new Binding("FullPath") { Converter = new ImagePathConverter(), ConverterParameter = 160 });
             image.SetValue(Image.HeightProperty, 80.0);
             image.SetValue(Image.MarginProperty, new Thickness(5));
             

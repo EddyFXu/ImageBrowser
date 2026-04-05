@@ -29,17 +29,64 @@ namespace ImageBrowser
 
     public class ImagePathConverter : IValueConverter
     {
+        private static readonly object _lock = new object();
+        private static readonly System.Collections.Generic.LinkedList<string> _keys = new System.Collections.Generic.LinkedList<string>();
+        private static readonly System.Collections.Generic.Dictionary<string, BitmapSource> _cache = new System.Collections.Generic.Dictionary<string, BitmapSource>(StringComparer.OrdinalIgnoreCase);
+
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
             string path = value as string;
             if (string.IsNullOrEmpty(path)) return null;
             try
             {
+                int decodeW = 0;
+                if (parameter != null)
+                {
+                    if (parameter is int) decodeW = (int)parameter;
+                    else
+                    {
+                        int tmp;
+                        if (int.TryParse(parameter.ToString(), out tmp)) decodeW = tmp;
+                    }
+                }
+
+                string key = decodeW > 0 ? (path + "|" + decodeW.ToString()) : path;
+                if (decodeW > 0)
+                {
+                    lock (_lock)
+                    {
+                        BitmapSource cached;
+                        if (_cache.TryGetValue(key, out cached)) return cached;
+                    }
+                }
+
                 BitmapImage bi = new BitmapImage();
                 bi.BeginInit();
-                bi.CacheOption = BitmapCacheOption.OnLoad; // Important to release file lock
+                bi.CacheOption = BitmapCacheOption.OnLoad;
+                bi.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+                if (decodeW > 0) bi.DecodePixelWidth = decodeW;
                 bi.UriSource = new Uri(path);
                 bi.EndInit();
+                bi.Freeze();
+
+                if (decodeW > 0)
+                {
+                    lock (_lock)
+                    {
+                        if (!_cache.ContainsKey(key))
+                        {
+                            _cache[key] = bi;
+                            _keys.AddLast(key);
+                            if (_keys.Count > 300)
+                            {
+                                string oldest = _keys.First.Value;
+                                _keys.RemoveFirst();
+                                _cache.Remove(oldest);
+                            }
+                        }
+                    }
+                }
+
                 return bi;
             }
             catch

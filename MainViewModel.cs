@@ -279,6 +279,7 @@ namespace ImageBrowser
 
         private string _settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ImageBrowser", "settings.xml");
         public AppSettings Settings { get; set; }
+        public string StartupPath { get; private set; }
 
         public MainViewModel()
         {
@@ -349,19 +350,12 @@ namespace ImageBrowser
             _currentTheme = Settings.CurrentTheme;
             ThemeManager.ApplyTheme(_currentTheme);
 
-            // Load last directory
             string lastPath = Settings.LastPath;
-            if (!string.IsNullOrEmpty(lastPath) && Directory.Exists(lastPath))
-            {
-                LoadFiles(lastPath);
-            }
+            if (!string.IsNullOrEmpty(lastPath) && Directory.Exists(lastPath)) StartupPath = lastPath;
             else
             {
                 string myPics = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
-                if (Directory.Exists(myPics))
-                {
-                    LoadFiles(myPics);
-                }
+                if (Directory.Exists(myPics)) StartupPath = myPics;
             }
         }
 
@@ -447,92 +441,143 @@ namespace ImageBrowser
             catch { }
         }
 
+        private int _loadGeneration;
+        private string _pendingSelectPath;
+        private readonly System.Threading.SemaphoreSlim _resolutionSemaphore = new System.Threading.SemaphoreSlim(2);
+
         private void LoadFiles(string path)
         {
+            int gen = System.Threading.Interlocked.Increment(ref _loadGeneration);
             CurrentFiles.Clear();
-            Settings.LastPath = path; // Update Settings
-            SaveSettings(); // Save Settings
-            try
-            {
-                var dirInfo = new DirectoryInfo(path);
-                var allFiles = dirInfo.GetFiles();
-                var allDirs = dirInfo.GetDirectories();
-                
-                var images = new List<FileSystemItem>();
-                var others = new List<FileSystemItem>();
-                
-                // Collect images
-                foreach (var file in allFiles)
-                {
-                    string ext = file.Extension.ToLower();
-                    if (ext == ".jpg" || ext == ".png" || ext == ".bmp" || ext == ".jpeg")
-                    {
-                        var item = new FileSystemItem(true)
-                        {
-                            Name = file.Name,
-                            FullPath = file.FullName,
-                            Type = ItemType.Image,
-                            Size = file.Length,
-                            CreationTime = file.CreationTime
-                        };
-                        
-                        // 异步加载分辨率
-                        System.Threading.Tasks.Task.Factory.StartNew(() => {
-                            try {
-                                using (var img = System.Drawing.Image.FromFile(item.FullPath)) {
-                                    item.TotalPixels = (long)img.Width * img.Height;
-                                    item.Resolution = string.Format("{0} × {1}", img.Width, img.Height);
-                                }
-                            } catch {
-                                item.Resolution = "未知";
-                            }
-                        });
+            Settings.LastPath = path;
 
-                        images.Add(item);
-                    }
-                    else
-                    {
-                        others.Add(new FileSystemItem(true)
-                        {
-                            Name = file.Name,
-                            FullPath = file.FullName,
-                            Type = ItemType.Unknown, // Or Generic File
-                            Size = file.Length,
-                            CreationTime = file.CreationTime
-                        });
-                    }
-                }
-                
-                // If images exist, show only images (as per usual image browser behavior)
-                // If NO images, show folders and other files
-                if (images.Count > 0)
+            System.Threading.Tasks.Task.Factory.StartNew(() =>
+            {
+                try { SaveSettings(); } catch { }
+            });
+
+            System.Threading.Tasks.Task.Factory.StartNew(() =>
+            {
+                try
                 {
-                    // For images, we just use the list. Sorting will be applied by SortFiles
-                    foreach (var img in images) CurrentFiles.Add(img);
-                    SortFiles();
-                }
-                else
-                {
-                    // Add directories first
-                    foreach (var dir in allDirs)
+                    var dirInfo = new DirectoryInfo(path);
+                    var allFiles = dirInfo.EnumerateFiles();
+                    var allDirs = dirInfo.EnumerateDirectories();
+
+                    var images = new List<FileSystemItem>();
+                    var others = new List<FileSystemItem>();
+                    var folders = new List<FileSystemItem>();
+
+                    foreach (var file in allFiles)
                     {
-                        if ((dir.Attributes & FileAttributes.Hidden) == 0)
+                        string ext = file.Extension.ToLower();
+                        if (ext == ".jpg" || ext == ".png" || ext == ".bmp" || ext == ".jpeg")
                         {
-                            CurrentFiles.Add(new FileSystemItem
+                            images.Add(new FileSystemItem(true)
                             {
-                                Name = dir.Name,
-                                FullPath = dir.FullName,
-                                Type = ItemType.Folder,
-                                CreationTime = dir.CreationTime
+                                Name = file.Name,
+                                FullPath = file.FullName,
+                                Type = ItemType.Image,
+                                Size = file.Length,
+                                CreationTime = file.CreationTime,
+                                Resolution = ""
+                            });
+                        }
+                        else
+                        {
+                            others.Add(new FileSystemItem(true)
+                            {
+                                Name = file.Name,
+                                FullPath = file.FullName,
+                                Type = ItemType.Unknown,
+                                Size = file.Length,
+                                CreationTime = file.CreationTime
                             });
                         }
                     }
-                    // Add other files
-                    foreach (var file in others) CurrentFiles.Add(file);
-                    SortFiles(); // Sort folders and others too
+
+                    if (images.Count == 0)
+                    {
+                        foreach (var dir in allDirs)
+                        {
+                            if ((dir.Attributes & FileAttributes.Hidden) == 0)
+                            {
+                                folders.Add(new FileSystemItem
+                                {
+                                    Name = dir.Name,
+                                    FullPath = dir.FullName,
+                                    Type = ItemType.Folder,
+                                    CreationTime = dir.CreationTime
+                                });
+                            }
+                        }
+                    }
+
+                    Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (gen != _loadGeneration) return;
+
+                        CurrentFiles.Clear();
+                        if (images.Count > 0)
+                        {
+                            foreach (var img in images) CurrentFiles.Add(img);
+                            SortFiles();
+                            foreach (var img in images) QueueResolutionLoad(img);
+                        }
+                        else
+                        {
+                            foreach (var f in folders) CurrentFiles.Add(f);
+                            foreach (var f in others) CurrentFiles.Add(f);
+                            SortFiles();
+                        }
+
+                        if (!string.IsNullOrEmpty(_pendingSelectPath))
+                        {
+                            var match = CurrentFiles.FirstOrDefault(f => f.FullPath.Equals(_pendingSelectPath, StringComparison.OrdinalIgnoreCase));
+                            if (match != null) SelectedFile = match;
+                            _pendingSelectPath = null;
+                        }
+                    }));
                 }
-            }
-            catch { }
+                catch { }
+            });
+        }
+
+        private void QueueResolutionLoad(FileSystemItem item)
+        {
+            System.Threading.Tasks.Task.Factory.StartNew(() =>
+            {
+                _resolutionSemaphore.Wait();
+                try
+                {
+                    int w = 0;
+                    int h = 0;
+                    using (var stream = new FileStream(item.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    {
+                        var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile | BitmapCreateOptions.DelayCreation, BitmapCacheOption.None);
+                        var frame = decoder.Frames[0];
+                        w = frame.PixelWidth;
+                        h = frame.PixelHeight;
+                    }
+
+                    Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        item.TotalPixels = (long)w * h;
+                        item.Resolution = string.Format("{0} × {1}", w, h);
+                    }));
+                }
+                catch
+                {
+                    Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        item.Resolution = "未知";
+                    }));
+                }
+                finally
+                {
+                    _resolutionSemaphore.Release();
+                }
+            });
         }
 
         private void SortFiles()
@@ -586,21 +631,29 @@ namespace ImageBrowser
         {
             if (File.Exists(path))
             {
-                // It's a file
                 string dir = Path.GetDirectoryName(path);
-                LoadFiles(dir);
-                
-                // Find the file in the list and select it
-                var fileItem = CurrentFiles.FirstOrDefault(f => f.FullPath.Equals(path, StringComparison.OrdinalIgnoreCase));
-                if (fileItem != null)
+                _pendingSelectPath = path;
+
+                try
                 {
-                    SelectedFile = fileItem;
-                    CurrentMode = DisplayMode.View;
+                    var fi = new FileInfo(path);
+                    SelectedFile = new FileSystemItem(true)
+                    {
+                        Name = fi.Name,
+                        FullPath = fi.FullName,
+                        Type = ItemType.Image,
+                        Size = fi.Length,
+                        CreationTime = fi.CreationTime
+                    };
                 }
+                catch { }
+
+                CurrentMode = DisplayMode.View;
+                LoadFiles(dir);
             }
             else if (Directory.Exists(path))
             {
-                // It's a directory
+                _pendingSelectPath = null;
                 LoadFiles(path);
                 CurrentMode = DisplayMode.Browse;
             }
